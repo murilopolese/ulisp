@@ -7,27 +7,14 @@
 // Compile options
 
 #define checkoverflow
-// #define resetautorun
 #define printfreespace
 #define serialmonitor
-// #define printgcs
-// #define sdcardsupport
-// #define lisplibrary
 
 // Includes
 
-// #include "LispLibrary.h"
 #include <avr/sleep.h>
 #include <setjmp.h>
-#include <SPI.h>
 #include <limits.h>
-
-#if defined(sdcardsupport)
-#include <SD.h>
-#define SDSIZE 172
-#else
-#define SDSIZE 0
-#endif
 
 // C Macros
 
@@ -63,11 +50,11 @@
 const int TRACEMAX = 3; // Number of traced functions
 enum type { ZERO=0, SYMBOL=2, NUMBER=4, STREAM=6, CHARACTER=8, STRING=10, PAIR=12 };  // STRING and PAIR must be last
 enum token { UNUSED, BRA, KET, QUO, DOT };
-enum stream { SERIALSTREAM, I2CSTREAM, SPISTREAM, SDSTREAM };
+enum stream { SERIALSTREAM };
 
 enum function { SYMBOLS, NIL, TEE, NOTHING, AMPREST, LAMBDA, LET, LETSTAR, CLOSURE, SPECIAL_FORMS, QUOTE,
 DEFUN, DEFVAR, SETQ, LOOP, PUSH, POP, INCF, DECF, SETF, DOLIST, DOTIMES, TRACE, UNTRACE, FORMILLIS,
-WITHSERIAL, WITHI2C, WITHSPI, WITHSDCARD, TAIL_FORMS, PROGN, RETURN, IF, COND, WHEN, UNLESS, AND, OR,
+WITHSERIAL, TAIL_FORMS, PROGN, RETURN, IF, COND, WHEN, UNLESS, AND, OR,
 FUNCTIONS, NOT, NULLFN, CONS, ATOM, LISTP, CONSP, SYMBOLP, STREAMP, EQ, CAR, FIRST, CDR, REST, CAAR, CADR,
 SECOND, CDAR, CDDR, CAAAR, CAADR, CADAR, CADDR, THIRD, CDAAR, CDADR, CDDAR, CDDDR, LENGTH, LIST, REVERSE,
 NTH, ASSOC, MEMBER, APPLY, FUNCALL, APPEND, MAPC, MAPCAR, ADD, SUBTRACT, MULTIPLY, DIVIDE, TRUNCATE, MOD,
@@ -75,9 +62,9 @@ ONEPLUS, ONEMINUS, ABS, RANDOM, MAXFN, MINFN, NOTEQ, NUMEQ, LESS, LESSEQ, GREATE
 MINUSP, ZEROP, ODDP, EVENP, INTEGERP, NUMBERP, CHAR, CHARCODE, CODECHAR, CHARACTERP, STRINGP, STRINGEQ,
 STRINGLESS, STRINGGREATER, SORT, STRINGFN, CONCATENATE, SUBSEQ, READFROMSTRING, PRINCTOSTRING,
 PRIN1TOSTRING, LOGAND, LOGIOR, LOGXOR, LOGNOT, ASH, LOGBITP, EVAL, GLOBALS, LOCALS, MAKUNBOUND, BREAK,
-READ, PRIN1, PRINT, PRINC, TERPRI, READBYTE, READLINE, WRITEBYTE, WRITESTRING, WRITELINE, RESTARTI2C, GC,
+READ, PRIN1, PRINT, PRINC, TERPRI, READBYTE, READLINE, WRITEBYTE, WRITESTRING, WRITELINE, GC,
 ROOM, SAVEIMAGE, LOADIMAGE, CLS, PINMODE, DIGITALREAD, DIGITALWRITE, ANALOGREAD, ANALOGWRITE, DELAY,
-MILLIS, SLEEP, NOTE, EDIT, PPRINT, PPRINTALL, ENDFUNCTIONS };
+MILLIS, SLEEP, EDIT, PPRINT, PPRINTALL, ENDFUNCTIONS };
 
 // Typedefs
 
@@ -115,26 +102,14 @@ typedef void (*pfun_t)(char);
 #define WORDALIGNED __attribute__((aligned (2)))
 #define BUFFERSIZE 18
 
-#if defined(__AVR_ATmega328P__)
-#define WORKSPACESIZE 315-SDSIZE        /* Cells (4*bytes) */
+#define WORKSPACESIZE 315               /* Cells (4*bytes) */
 #define EEPROMSIZE 1024                 /* Bytes */
 #define SYMBOLTABLESIZE BUFFERSIZE      /* Bytes - no long symbols */
 
-#elif defined(__AVR_ATmega2560__)
-#define WORKSPACESIZE 1216-SDSIZE       /* Cells (4*bytes) */
-#define EEPROMSIZE 4096                 /* Bytes */
-#define SYMBOLTABLESIZE 512             /* Bytes */
-
-#elif defined(__AVR_ATmega1284P__)
-#define WORKSPACESIZE 2816-SDSIZE       /* Cells (4*bytes) */
-#define EEPROMSIZE 4096                 /* Bytes */
-#define SYMBOLTABLESIZE 512             /* Bytes */
-#endif
 
 object Workspace[WORKSPACESIZE] WORDALIGNED;
 char SymbolTable[SYMBOLTABLESIZE];
 typedef int BitOrder;
-#define SDCARD_SS_PIN 10
 
 // Global variables
 
@@ -142,7 +117,6 @@ jmp_buf exception;
 unsigned int Freespace = 0;
 object *Freelist;
 char *SymbolTop = SymbolTable;
-unsigned int I2CCount;
 unsigned int TraceFn[TRACEMAX];
 unsigned int TraceDepth[TRACEMAX];
 
@@ -255,7 +229,7 @@ void markobject (object *obj) {
   object* arg = car(obj);
   unsigned int type = obj->type;
   mark(obj);
-  
+
   if (type >= PAIR || type == ZERO) { // cons
     markobject(arg);
     obj = cdr(obj);
@@ -303,7 +277,7 @@ void movepointer (object *from, object *to) {
     object *obj = &Workspace[i];
     unsigned int type = (obj->type) & ~MARKBIT;
     if (marked(obj) && (type >= STRING || type==ZERO)) {
-      if (car(obj) == (object *)((uintptr_t)from | MARKBIT)) 
+      if (car(obj) == (object *)((uintptr_t)from | MARKBIT))
         car(obj) = (object *)((uintptr_t)to | MARKBIT);
       if (cdr(obj) == from) cdr(obj) = to;
     }
@@ -320,7 +294,7 @@ void movepointer (object *from, object *to) {
     }
   }
 }
-  
+
 int compactimage (object **arg) {
   markobject(tee);
   markobject(GlobalEnv);
@@ -345,19 +319,6 @@ int compactimage (object **arg) {
   return firstfree - Workspace;
 }
 
-// Make SD card filename
-
-char *MakeFilename (object *arg) {
-  char *buffer = SymbolTop;
-  int i = 0;
-  do {
-    char c = nthchar(arg, i);
-    if (c == '\0') break;
-    buffer[i++] = c;
-  } while (i<12);  // Truncate to 12 chars
-  buffer[i] = '\0';
-  return buffer;
-}
 
 // Save-image and load-image
 
@@ -692,7 +653,7 @@ object *findtwin (object *var, object *env) {
 }
 
 // Handling closures
-  
+
 object *closure (int tc, object *fname, object *state, object *function, object *args, object **env) {
   int trace = 0;
   if (fname != NULL) trace = tracing(fname->name);
@@ -802,122 +763,17 @@ inline object *cdrx (object *arg) {
   return cdr(arg);
 }
 
-// I2C interface
-
-#if defined(__AVR_ATmega328P__)
-uint8_t const TWI_SDA_PIN = 18;
-uint8_t const TWI_SCL_PIN = 19;
-#elif defined(__AVR_ATmega1280__) || defined(__AVR_ATmega2560__)
-uint8_t const TWI_SDA_PIN = 20;
-uint8_t const TWI_SCL_PIN = 21;
-#elif defined(__AVR_ATmega644P__) || defined(__AVR_ATmega1284P__)
-uint8_t const TWI_SDA_PIN = 17;
-uint8_t const TWI_SCL_PIN = 16;
-#elif defined(__AVR_ATmega32U4__)
-uint8_t const TWI_SDA_PIN = 6;
-uint8_t const TWI_SCL_PIN = 5;
-#endif
-
-uint32_t const F_TWI = 400000L;  // Hardware I2C clock in Hz
-uint8_t const TWSR_MTX_DATA_ACK = 0x28;
-uint8_t const TWSR_MTX_ADR_ACK = 0x18;
-uint8_t const TWSR_MRX_ADR_ACK = 0x40;
-uint8_t const TWSR_START = 0x08;
-uint8_t const TWSR_REP_START = 0x10;
-uint8_t const I2C_READ = 1;
-uint8_t const I2C_WRITE = 0;
-
-void I2Cinit(bool enablePullup) {
-  TWSR = 0;                        // no prescaler
-  TWBR = (F_CPU/F_TWI - 16)/2;     // set bit rate factor
-  if (enablePullup) {
-    digitalWrite(TWI_SDA_PIN, HIGH);
-    digitalWrite(TWI_SCL_PIN, HIGH);
-  }
-}
-
-uint8_t I2Cread() {
-  if (I2CCount != 0) I2CCount--;
-  TWCR = 1<<TWINT | 1<<TWEN | ((I2CCount == 0) ? 0 : (1<<TWEA));
-  while (!(TWCR & 1<<TWINT));
-  return TWDR;
-}
-
-bool I2Cwrite(uint8_t data) {
-  TWDR = data;
-  TWCR = 1<<TWINT | 1 << TWEN;
-  while (!(TWCR & 1<<TWINT));
-  return (TWSR & 0xF8) == TWSR_MTX_DATA_ACK;
-}
-
-bool I2Cstart(uint8_t address, uint8_t read) {
-  uint8_t addressRW = address<<1 | read;
-  TWCR = 1<<TWINT | 1<<TWSTA | 1<<TWEN;    // send START condition
-  while (!(TWCR & 1<<TWINT));
-  if ((TWSR & 0xF8) != TWSR_START && (TWSR & 0xF8) != TWSR_REP_START) return false;
-  TWDR = addressRW;  // send device address and direction
-  TWCR = 1<<TWINT | 1<<TWEN;
-  while (!(TWCR & 1<<TWINT));
-  if (addressRW & I2C_READ) return (TWSR & 0xF8) == TWSR_MRX_ADR_ACK;
-  else return (TWSR & 0xF8) == TWSR_MTX_ADR_ACK;
-}
-
-bool I2Crestart(uint8_t address, uint8_t read) {
-  return I2Cstart(address, read);
-}
-
-void I2Cstop(uint8_t read) {
-  (void) read;
-  TWCR = 1<<TWINT | 1<<TWEN | 1<<TWSTO;
-  while (TWCR & 1<<TWSTO); // wait until stop and bus released
-}
-
 // Streams
 
-inline int spiread () { return SPI.transfer(0); }
-#if defined(__AVR_ATmega1284P__)
 inline int serial1read () { while (!Serial1.available()) testescape(); return Serial1.read(); }
-#elif defined(__AVR_ATmega2560__)
-inline int serial1read () { while (!Serial1.available()) testescape(); return Serial1.read(); }
-inline int serial2read () { while (!Serial2.available()) testescape(); return Serial2.read(); }
-inline int serial3read () { while (!Serial3.available()) testescape(); return Serial3.read(); }
-#endif
-#if defined(sdcardsupport)
-File SDpfile, SDgfile;
-inline int SDread () {
-  if (LastChar) { 
-    char temp = LastChar;
-    LastChar = 0;
-    return temp;
-  }
-  return SDgfile.read();
-}
-#endif
+
 
 void serialbegin (int address, int baud) {
-  #if defined(__AVR_ATmega328P__)
   (void) address; (void) baud;
-  #elif defined(__AVR_ATmega1284P__)
-  if (address == 1) Serial1.begin((long)baud*100);
-  else error(PSTR("'with-serial' port not supported"));
-  #elif defined(__AVR_ATmega2560__)
-  if (address == 1) Serial1.begin((long)baud*100);
-  else if (address == 2) Serial2.begin((long)baud*100);
-  else if (address == 3) Serial3.begin((long)baud*100);
-  else error(PSTR("'with-serial' port not supported"));
-  #endif
 }
 
 void serialend (int address) {
-  #if defined(__AVR_ATmega328P__)
   (void) address;
-  #elif defined(__AVR_ATmega1284P__)
-  if (address == 1) Serial1.end();
-  #elif defined(__AVR_ATmega2560__)
-  if (address == 1) Serial1.end();
-  else if (address == 2) Serial2.end();
-  else if (address == 3) Serial3.end();
-  #endif
 }
 
 gfun_t gstreamfun (object *args) {
@@ -928,36 +784,15 @@ gfun_t gstreamfun (object *args) {
     int stream = istream(first(args));
     streamtype = stream>>8; address = stream & 0xFF;
   }
-  if (streamtype == I2CSTREAM) gfun = (gfun_t)I2Cread;
-  else if (streamtype == SPISTREAM) gfun = spiread;
   else if (streamtype == SERIALSTREAM) {
     if (address == 0) gfun = gserial;
-    #if defined(__AVR_ATmega1284P__)
     else if (address == 1) gfun = serial1read;
-    #elif defined(__AVR_ATmega2560__)
-    else if (address == 1) gfun = serial1read;
-    else if (address == 2) gfun = serial2read;
-    else if (address == 3) gfun = serial3read;
-    #endif
   }
-  #if defined(sdcardsupport)
-  else if (streamtype == SDSTREAM) gfun = (gfun_t)SDread;
-  #endif
   else error(PSTR("Unknown stream type"));
   return gfun;
 }
 
-inline void spiwrite (char c) { SPI.transfer(c); }
-#if defined(__AVR_ATmega1284P__)
 inline void serial1write (char c) { Serial1.write(c); }
-#elif defined(__AVR_ATmega2560__)
-inline void serial1write (char c) { Serial1.write(c); }
-inline void serial2write (char c) { Serial2.write(c); }
-inline void serial3write (char c) { Serial3.write(c); }
-#endif
-#if defined(sdcardsupport)
-inline void SDwrite (char c) { SDpfile.write(c); }
-#endif
 
 pfun_t pstreamfun (object *args) {
   int streamtype = SERIALSTREAM;
@@ -967,21 +802,10 @@ pfun_t pstreamfun (object *args) {
     int stream = istream(first(args));
     streamtype = stream>>8; address = stream & 0xFF;
   }
-  if (streamtype == I2CSTREAM) pfun = (pfun_t)I2Cwrite;
-  else if (streamtype == SPISTREAM) pfun = spiwrite;
   else if (streamtype == SERIALSTREAM) {
     if (address == 0) pfun = pserial;
-    #if defined(__AVR_ATmega1284P__)
     else if (address == 1) pfun = serial1write;
-    #elif defined(__AVR_ATmega2560__)
-    else if (address == 1) pfun = serial1write;
-    else if (address == 2) pfun = serial2write;
-    else if (address == 3) pfun = serial3write;
-    #endif
   }
-  #if defined(sdcardsupport)
-  else if (streamtype == SDSTREAM) pfun = (pfun_t)SDwrite;
-  #endif
   else error(PSTR("unknown stream type"));
   return pfun;
 }
@@ -989,74 +813,13 @@ pfun_t pstreamfun (object *args) {
 // Check pins
 
 void checkanalogread (int pin) {
-#if defined(__AVR_ATmega328P__)
+  // TODO: Check actual Quirkbot pins
   if (!(pin>=0 && pin<=5)) error(PSTR("'analogread' invalid pin"));
-#elif defined(__AVR_ATmega2560__)
-  if (!(pin>=0 && pin<=15)) error(PSTR("'analogread' invalid pin"));
-#elif defined(__AVR_ATmega1284P__)
-  if (!(pin>=0 && pin<=7)) error(PSTR("'analogread' invalid pin"));
-#endif
 }
 
 void checkanalogwrite (int pin) {
-#if defined(__AVR_ATmega328P__)
+  // TODO: Check actual Quirkbot pins
   if (!(pin>=3 && pin<=11 && pin!=4 && pin!=7 && pin!=8)) error(PSTR("'analogwrite' invalid pin"));
-#elif defined(__AVR_ATmega2560__)
-  if (!((pin>=2 && pin<=13) || (pin>=44 && pin <=46))) error(PSTR("'analogwrite' invalid pin"));
-#elif defined(__AVR_ATmega1284P__)
-  if (!(pin==3 || pin==4 || pin==6 || pin==7 || (pin>=12 && pin<=15))) error(PSTR("'analogwrite' invalid pin"));
-#endif
-}
-
-// Note
-
-const uint8_t scale[] PROGMEM = {239,226,213,201,190,179,169,160,151,142,134,127};
-
-void playnote (int pin, int note, int octave) {
-  #if defined(__AVR_ATmega328P__)
-  if (pin == 3) {
-    DDRD = DDRD | 1<<DDD3; // PD3 (Arduino D3) as output
-    TCCR2A = 0<<COM2A0 | 1<<COM2B0 | 2<<WGM20; // Toggle OC2B on match
-  } else if (pin == 11) {
-    DDRB = DDRB | 1<<DDB3; // PB3 (Arduino D11) as output
-    TCCR2A = 1<<COM2A0 | 0<<COM2B0 | 2<<WGM20; // Toggle OC2A on match
-  } else error(PSTR("'note' pin not supported"));
-  int prescaler = 9 - octave - note/12;
-  if (prescaler<3 || prescaler>6) error(PSTR("'note' octave out of range"));
-  OCR2A = pgm_read_byte(&scale[note%12]) - 1;
-  TCCR2B = 0<<WGM22 | prescaler<<CS20;
-
-  #elif defined(__AVR_ATmega2560__)
-  if (pin == 9) {
-    DDRH = DDRH | 1<<DDH6; // PH6 (Arduino D9) as output
-    TCCR2A = 0<<COM2A0 | 1<<COM2B0 | 2<<WGM20; // Toggle OC2B on match
-  } else if (pin == 10) {
-    DDRB = DDRB | 1<<DDB4; // PB4 (Arduino D10) as output
-    TCCR2A = 1<<COM2A0 | 0<<COM2B0 | 2<<WGM20; // Toggle OC2A on match
-  } else error(PSTR("'note' pin not supported"));
-  int prescaler = 9 - octave - note/12;
-  if (prescaler<3 || prescaler>6) error(PSTR("'note' octave out of range"));
-  OCR2A = pgm_read_byte(&scale[note%12]) - 1;
-  TCCR2B = 0<<WGM22 | prescaler<<CS20;
-
-  #elif defined(__AVR_ATmega1284P__)
-  if (pin == 14) {
-    DDRD = DDRD | 1<<DDD6; // PD6 (Arduino D14) as output
-    TCCR2A = 0<<COM2A0 | 1<<COM2B0 | 2<<WGM20; // Toggle OC2B on match
-  } else if (pin == 15) {
-    DDRD = DDRD | 1<<DDD7; // PD7 (Arduino D15) as output
-    TCCR2A = 1<<COM2A0 | 0<<COM2B0 | 2<<WGM20; // Toggle OC2A on match
-  } else error(PSTR("'note' pin not supported"));
-  int prescaler = 9 - octave - note/12;
-  if (prescaler<3 || prescaler>6) error(PSTR("'note' octave out of range"));
-  OCR2A = pgm_read_byte(&scale[note%12]) - 1;
-  TCCR2B = 0<<WGM22 | prescaler<<CS20;
-  #endif
-}
-
-void nonote (int pin) {
-  (void) pin;
-  TCCR2B = 0<<WGM22 | 0<<CS20;
 }
 
 // Sleep
@@ -1077,11 +840,6 @@ void sleep (int secs) {
   delay(100);  // Give serial time to settle
   // Disable ADC and timer 0
   ADCSRA = ADCSRA & ~(1<<ADEN);
-#if defined(__AVR_ATmega328P__)
-  PRR = PRR | 1<<PRTIM0;
-#elif defined(__AVR_ATmega2560__) || defined(__AVR_ATmega1284P__)
-  PRR0 = PRR0 | 1<<PRTIM0;
-#endif
   while (secs > 0) {
     sleep_enable();
     sleep_cpu();
@@ -1091,11 +849,6 @@ void sleep (int secs) {
   WDTCSR = 0;
   // Enable ADC and timer 0
   ADCSRA = ADCSRA | 1<<ADEN;
-#if defined(__AVR_ATmega328P__)
-  PRR = PRR & ~(1<<PRTIM0);
-#elif defined(__AVR_ATmega2560__) || defined(__AVR_ATmega1284P__)
-  PRR0 = PRR0 & ~(1<<PRTIM0);
-#endif
 }
 
 // Special forms
@@ -1314,92 +1067,6 @@ object *sp_withserial (object *args, object *env) {
   object *result = eval(tf_progn(forms,env), env);
   serialend(address);
   return result;
-}
-
-object *sp_withi2c (object *args, object *env) {
-  object *params = first(args);
-  object *var = first(params);
-  int address = integer(eval(second(params), env));
-  params = cddr(params);
-  int read = 0; // Write
-  I2CCount = 0;
-  if (params != NULL) {
-    object *rw = eval(first(params), env);
-    if (integerp(rw)) I2CCount = integer(rw);
-    read = (rw != NULL);
-  }
-  I2Cinit(1); // Pullups
-  object *pair = cons(var, (I2Cstart(address, read)) ? stream(I2CSTREAM, address) : nil);
-  push(pair,env);
-  object *forms = cdr(args);
-  object *result = eval(tf_progn(forms,env), env);
-  I2Cstop(read);
-  return result;
-}
-
-object *sp_withspi (object *args, object *env) {
-  object *params = first(args);
-  object *var = first(params);
-  int pin = integer(eval(second(params), env));
-  int divider = 0, mode = 0, bitorder = 1;
-  object *pair = cons(var, stream(SPISTREAM, pin));
-  push(pair,env);
-  SPI.begin();
-  params = cddr(params);
-  if (params != NULL) {
-    int d = integer(eval(first(params), env));
-    if (d<1 || d>7) error(PSTR("'with-spi' invalid divider"));
-    if (d == 7) divider = 3;
-    else if (d & 1) divider = (d>>1) + 4;
-    else divider = (d>>1) - 1;
-    params = cdr(params);
-    if (params != NULL) {
-      bitorder = (eval(first(params), env) == NULL);
-      params = cdr(params);
-      if (params != NULL) mode = integer(eval(first(params), env));
-    }
-  }
-  pinMode(pin, OUTPUT);
-  digitalWrite(pin, LOW);
-  SPI.setBitOrder((BitOrder)bitorder);
-  SPI.setClockDivider(divider);
-  SPI.setDataMode(mode);
-  object *forms = cdr(args);
-  object *result = eval(tf_progn(forms,env), env);
-  digitalWrite(pin, HIGH);
-  SPI.end();
-  return result;
-}
-
-object *sp_withsdcard (object *args, object *env) {
-#if defined(sdcardsupport)
-  object *params = first(args);
-  object *var = first(params);
-  object *filename = eval(second(params), env);
-  params = cddr(params);
-  SD.begin(SDCARD_SS_PIN);
-  int mode = 0;
-  if (params != NULL && first(params) != NULL) mode = integer(first(params));
-  int oflag = O_READ;
-  if (mode == 1) oflag = O_RDWR | O_CREAT | O_APPEND; else if (mode == 2) oflag = O_RDWR | O_CREAT | O_TRUNC;
-  if (mode >= 1) {
-    SDpfile = SD.open(MakeFilename(filename), oflag);
-    if (!SDpfile) error(PSTR("Problem writing to SD card"));
-  } else {
-    SDgfile = SD.open(MakeFilename(filename), oflag);
-    if (!SDgfile) error(PSTR("Problem reading from SD card"));
-  }
-  object *pair = cons(var, stream(SDSTREAM, 1));
-  push(pair,env);
-  object *forms = cdr(args);
-  object *result = eval(tf_progn(forms,env), env);
-  if (mode >= 1) SDpfile.close(); else SDgfile.close();
-  return result;
-#else
-  (void) args, (void) env;
-  error(PSTR("with-sd-card not supported"));
-  return nil;
-#endif
 }
 
 // Tail-recursive forms
@@ -1896,7 +1563,7 @@ object *fn_minfn (object *args, object *env) {
 
 object *fn_noteq (object *args, object *env) {
   (void) env;
-  while (args != NULL) {   
+  while (args != NULL) {
     object *nargs = args;
     int arg1 = integer(first(nargs));
     nargs = cdr(nargs);
@@ -2044,7 +1711,7 @@ object *fn_characterp (object *args, object *env) {
 }
 
 // Strings
-
+/*
 object *fn_stringp (object *args, object *env) {
   (void) env;
   return stringp(first(args)) ? tee : nil;
@@ -2187,7 +1854,7 @@ object *fn_subseq (object *args, object *env) {
 }
 
 int gstr () {
-  if (LastChar) { 
+  if (LastChar) {
     char temp = LastChar;
     LastChar = 0;
     return temp;
@@ -2196,7 +1863,7 @@ int gstr () {
   return (c != 0) ? c : '\n'; // -1?
 }
 
-object *fn_readfromstring (object *args, object *env) {   
+object *fn_readfromstring (object *args, object *env) {
   (void) env;
   object *arg = first(args);
   if (!stringp(arg)) error(PSTR("'read-from-string' argument is not a string"));
@@ -2208,8 +1875,8 @@ object *fn_readfromstring (object *args, object *env) {
 void pstr (char c) {
   buildstring(c, &GlobalStringIndex, &GlobalString);
 }
- 
-object *fn_princtostring (object *args, object *env) {   
+
+object *fn_princtostring (object *args, object *env) {
   (void) env;
   object *arg = first(args);
   object *obj = myalloc();
@@ -2224,7 +1891,7 @@ object *fn_princtostring (object *args, object *env) {
   return obj;
 }
 
-object *fn_prin1tostring (object *args, object *env) {   
+object *fn_prin1tostring (object *args, object *env) {
   (void) env;
   object *arg = first(args);
   object *obj = myalloc();
@@ -2235,6 +1902,7 @@ object *fn_prin1tostring (object *args, object *env) {
   obj->cdr = GlobalString;
   return obj;
 }
+*/
 
 // Bitwise operators
 
@@ -2410,22 +2078,6 @@ object *fn_writeline (object *args, object *env) {
   return nil;
 }
 
-object *fn_restarti2c (object *args, object *env) {
-  (void) env;
-  int stream = first(args)->integer;
-  args = cdr(args);
-  int read = 0; // Write
-  I2CCount = 0;
-  if (args != NULL) {
-    object *rw = first(args);
-    if (integerp(rw)) I2CCount = integer(rw);
-    read = (rw != NULL);
-  }
-  int address = stream & 0xFF;
-  if (stream>>8 != I2CSTREAM) error(PSTR("'restart' not i2c"));
-  return I2Crestart(address, read) ? tee : nil;
-}
-
 object *fn_gc (object *obj, object *env) {
   int initial = Freespace;
   unsigned long start = micros();
@@ -2497,7 +2149,7 @@ object *fn_analogread (object *args, object *env) {
   checkanalogread(pin);
   return number(analogRead(pin));
 }
- 
+
 object *fn_analogwrite (object *args, object *env) {
   (void) env;
   int pin = integer(first(args));
@@ -2526,22 +2178,8 @@ object *fn_sleep (object *args, object *env) {
   return arg1;
 }
 
-object *fn_note (object *args, object *env) {
-  (void) env;
-  static int pin = 255;
-  if (args != NULL) {
-    pin = integer(first(args));
-    int note = 0;
-    if (cddr(args) != NULL) note = integer(second(args));
-    int octave = 0;
-    if (cddr(args) != NULL) octave = integer(third(args));
-    playnote(pin, note, octave);
-  } else nonote(pin);
-  return nil;
-}
-
 // Tree Editor
-
+/*
 object *fn_edit (object *args, object *env) {
   object *fun = first(args);
   object *pair = findvalue(fun, env);
@@ -2567,7 +2205,7 @@ object *edit (object *fun) {
     else pserial('?');
   }
 }
-
+*/
 // Pretty printer
 
 const int PPINDENT = 2;
@@ -2578,7 +2216,7 @@ void pcount (char c) {
   if (c == '\n') GlobalStringIndex++;
   GlobalStringIndex++;
 }
-  
+
 int atomwidth (object *obj) {
   GlobalStringIndex = 0;
   printobject(obj, pcount);
@@ -2615,8 +2253,8 @@ void superprint (object *form, int lm, pfun_t pfun) {
 }
 
 const int ppspecials = 14;
-const char ppspecial[ppspecials] PROGMEM = 
-  { DOTIMES, DOLIST, IF, SETQ, TEE, LET, LETSTAR, LAMBDA, WHEN, UNLESS, WITHI2C, WITHSERIAL, WITHSPI, WITHSDCARD };
+const char ppspecial[ppspecials] PROGMEM =
+  { DOTIMES, DOLIST, IF, SETQ, TEE, LET, LETSTAR, LAMBDA, WHEN, UNLESS, WITHSERIAL };
 
 void supersub (object *form, int lm, int super, pfun_t pfun) {
   int special = 0, separate = 1;
@@ -2625,8 +2263,8 @@ void supersub (object *form, int lm, int super, pfun_t pfun) {
     int name = arg->name;
     if (name == DEFUN) special = 2;
     else for (int i=0; i<ppspecials; i++) {
-      if (name == pgm_read_byte(&ppspecial[i])) { special = 1; break; }    
-    } 
+      if (name == pgm_read_byte(&ppspecial[i])) { special = 1; break; }
+    }
   }
   while (form != NULL) {
     if (atom(form)) { pfstring(PSTR(" . "), pfun); printobject(form, pfun); pfun(')'); return; }
@@ -2635,7 +2273,7 @@ void supersub (object *form, int lm, int super, pfun_t pfun) {
     else if (!super) pfun(' ');
     else { pln(pfun); indent(lm, pfun); }
     superprint(car(form), lm, pfun);
-    form = cdr(form);   
+    form = cdr(form);
   }
   pfun(')'); return;
 }
@@ -2696,9 +2334,6 @@ const char string22[] PROGMEM = "trace";
 const char string23[] PROGMEM = "untrace";
 const char string24[] PROGMEM = "for-millis";
 const char string25[] PROGMEM = "with-serial";
-const char string26[] PROGMEM = "with-i2c";
-const char string27[] PROGMEM = "with-spi";
-const char string28[] PROGMEM = "with-sd-card";
 const char string29[] PROGMEM = "tail_forms";
 const char string30[] PROGMEM = "progn";
 const char string31[] PROGMEM = "return";
@@ -2776,6 +2411,7 @@ const char string102[] PROGMEM = "char";
 const char string103[] PROGMEM = "char-code";
 const char string104[] PROGMEM = "code-char";
 const char string105[] PROGMEM = "characterp";
+/*
 const char string106[] PROGMEM = "stringp";
 const char string107[] PROGMEM = "string=";
 const char string108[] PROGMEM = "string<";
@@ -2787,6 +2423,7 @@ const char string113[] PROGMEM = "subseq";
 const char string114[] PROGMEM = "read-from-string";
 const char string115[] PROGMEM = "princ-to-string";
 const char string116[] PROGMEM = "prin1-to-string";
+*/
 const char string117[] PROGMEM = "logand";
 const char string118[] PROGMEM = "logior";
 const char string119[] PROGMEM = "logxor";
@@ -2808,7 +2445,6 @@ const char string134[] PROGMEM = "read-line";
 const char string135[] PROGMEM = "write-byte";
 const char string136[] PROGMEM = "write-string";
 const char string137[] PROGMEM = "write-line";
-const char string138[] PROGMEM = "restart-i2c";
 const char string139[] PROGMEM = "gc";
 const char string140[] PROGMEM = "room";
 const char string141[] PROGMEM = "save-image";
@@ -2822,8 +2458,8 @@ const char string148[] PROGMEM = "analogwrite";
 const char string149[] PROGMEM = "delay";
 const char string150[] PROGMEM = "millis";
 const char string151[] PROGMEM = "sleep";
-const char string152[] PROGMEM = "note";
-const char string153[] PROGMEM = "edit";
+//const char string152[] PROGMEM = "note";
+//const char string153[] PROGMEM = "edit";
 const char string154[] PROGMEM = "pprint";
 const char string155[] PROGMEM = "pprintall";
 
@@ -2854,9 +2490,6 @@ const tbl_entry_t lookup_table[] PROGMEM = {
   { string23, sp_untrace, 0, 1 },
   { string24, sp_formillis, 1, 127 },
   { string25, sp_withserial, 1, 127 },
-  { string26, sp_withi2c, 1, 127 },
-  { string27, sp_withspi, 1, 127 },
-  { string28, sp_withsdcard, 2, 127 },
   { string29, NULL, NIL, NIL },
   { string30, tf_progn, 0, 127 },
   { string31, tf_return, 0, 127 },
@@ -2934,6 +2567,7 @@ const tbl_entry_t lookup_table[] PROGMEM = {
   { string103, fn_charcode, 1, 1 },
   { string104, fn_codechar, 1, 1 },
   { string105, fn_characterp, 1, 1 },
+  /*
   { string106, fn_stringp, 1, 1 },
   { string107, fn_stringeq, 2, 2 },
   { string108, fn_stringless, 2, 2 },
@@ -2945,6 +2579,7 @@ const tbl_entry_t lookup_table[] PROGMEM = {
   { string114, fn_readfromstring, 1, 1 },
   { string115, fn_princtostring, 1, 1 },
   { string116, fn_prin1tostring, 1, 1 },
+  */
   { string117, fn_logand, 0, 127 },
   { string118, fn_logior, 0, 127 },
   { string119, fn_logxor, 0, 127 },
@@ -2966,7 +2601,7 @@ const tbl_entry_t lookup_table[] PROGMEM = {
   { string135, fn_writebyte, 1, 2 },
   { string136, fn_writestring, 1, 2 },
   { string137, fn_writeline, 1, 2 },
-  { string138, fn_restarti2c, 1, 2 },
+  //{ string138, fn_restarti2c, 1, 2 },
   { string139, fn_gc, 0, 0 },
   { string140, fn_room, 0, 0 },
   { string141, fn_saveimage, 0, 1 },
@@ -2980,8 +2615,8 @@ const tbl_entry_t lookup_table[] PROGMEM = {
   { string149, fn_delay, 1, 1 },
   { string150, fn_millis, 0, 0 },
   { string151, fn_sleep, 1, 1 },
-  { string152, fn_note, 0, 3 },
-  { string153, fn_edit, 1, 1 },
+  //{ string152, fn_note, 0, 3 },
+  //{ string153, fn_edit, 1, 1 },
   { string154, fn_pprint, 1, 2 },
   { string155, fn_pprintall, 0, 0 },
 };
@@ -3064,8 +2699,8 @@ object *eval (object *form, object *env) {
   if (tstflag(ESCAPE)) { clrflag(ESCAPE); error(PSTR("Escape!"));}
   #if defined (serialmonitor)
   testescape();
-  #endif 
-  
+  #endif
+
   if (form == NULL) return nil;
 
   if (integerp(form) || characterp(form) || stringp(form)) return form;
@@ -3080,7 +2715,7 @@ object *eval (object *form, object *env) {
     else if (name <= ENDFUNCTIONS) return form;
     error2(form, PSTR("undefined"));
   }
-  
+
   // It's a list
   object *function = car(form);
   object *args = cdr(form);
@@ -3126,7 +2761,7 @@ object *eval (object *form, object *env) {
       }
       return cons(symbol(CLOSURE), cons(envcopy,args));
     }
-    
+
     if ((name > SPECIAL_FORMS) && (name < TAIL_FORMS)) {
       return ((fn_ptr_type)lookupfn(name))(args, env);
     }
@@ -3137,7 +2772,7 @@ object *eval (object *form, object *env) {
       goto EVAL;
     }
   }
-        
+
   // Evaluate the parameters - result in head
   object *fname = car(form);
   int TCstart = TC;
@@ -3154,10 +2789,10 @@ object *eval (object *form, object *env) {
     form = cdr(form);
     nargs++;
   }
-    
+
   function = car(head);
   args = cdr(head);
- 
+
   if (symbolp(function)) {
     symbol_t name = function->name;
     if (name >= ENDFUNCTIONS) error2(fname, PSTR("is not valid here"));
@@ -3167,7 +2802,7 @@ object *eval (object *form, object *env) {
     pop(GCStack);
     return result;
   }
-      
+
   if (listp(function) && issymbol(car(function), LAMBDA)) {
     form = closure(TCstart, fname, NULL, cdr(function), args, &env);
     pop(GCStack);
@@ -3192,8 +2827,8 @@ object *eval (object *form, object *env) {
     pop(GCStack);
     TC = 1;
     goto EVAL;
-  } 
-  
+  }
+
   error2(fname, PSTR("is an illegal function")); return nil;
 }
 
@@ -3303,42 +2938,19 @@ void printobject (object *form, pfun_t pfun){
     printstring(form, pfun);
   } else if (streamp(form)) {
     pfstring(PSTR("<"), pfun);
-    if ((form->integer)>>8 == SPISTREAM) pfstring(PSTR("spi"), pfun);
-    else if ((form->integer)>>8 == I2CSTREAM) pfstring(PSTR("i2c"), pfun);
-    else if ((form->integer)>>8 == SDSTREAM) pfstring(PSTR("sd"), pfun);
-    else pfstring(PSTR("serial"), pfun);
+    pfstring(PSTR("serial"), pfun);
     pfstring(PSTR("-stream "), pfun);
     pint(form->integer & 0xFF, pfun);
     pfun('>');
-  } else
+  } else {
     error(PSTR("Error in print."));
-}
-
-// Read functions
-
-#if defined(lisplibrary)
-int glibrary () {
-  if (LastChar) { 
-    char temp = LastChar;
-    LastChar = 0;
-    return temp;
-  }
-  char c = pgm_read_byte(&LispLibrary[GlobalStringIndex++]);
-  return (c != 0) ? c : -1; // -1?
-}
-
-void loadfromlibrary (object *env) {   
-  GlobalStringIndex = 0;
-  object *line = read(glibrary);
-  while (line != NULL) {
-    eval(line, env);
-    line = read(glibrary);
   }
 }
-#endif
+
+// Read functionss
 
 int gserial () {
-  if (LastChar) { 
+  if (LastChar) {
     char temp = LastChar;
     LastChar = 0;
     return temp;
@@ -3366,7 +2978,7 @@ object *nextitem (gfun_t gfun) {
 
   // Parse string
   if (ch == '"') return readstring('"', gfun);
-  
+
   // Parse symbol, character, or number
   int index = 0, base = 10, sign = 1;
   char *buffer = SymbolTop;
@@ -3404,7 +3016,7 @@ object *nextitem (gfun_t gfun) {
   if (ch == ')' || ch == '(') LastChar = ch;
 
   if (isnumber) {
-    if (base == 10 && result > ((unsigned int)INT_MAX+(1-sign)/2)) 
+    if (base == 10 && result > ((unsigned int)INT_MAX+(1-sign)/2))
       error(PSTR("Number out of range"));
     return number(result*sign);
   } else if (base == 0) {
@@ -3416,7 +3028,7 @@ object *nextitem (gfun_t gfun) {
     }
     error(PSTR("Unknown character"));
   }
-  
+
   int x = builtin(buffer);
   if (x == NIL) return nil;
   if (x < ENDFUNCTIONS) return newsymbol(x);
@@ -3454,7 +3066,7 @@ object *read (gfun_t gfun) {
   if (item == (object *)KET) error(PSTR("Incomplete list"));
   if (item == (object *)BRA) return readrest(gfun);
   if (item == (object *)DOT) return read(gfun);
-  if (item == (object *)QUO) return cons(symbol(QUOTE), cons(read(gfun), NULL)); 
+  if (item == (object *)QUO) return cons(symbol(QUOTE), cons(read(gfun), NULL));
   return item;
 }
 
@@ -3514,11 +3126,5 @@ void loop () {
   }
   // Come here after error
   for (int i=0; i<TRACEMAX; i++) TraceDepth[i] = 0;
-  #if defined(sdcardsupport)
-  SDpfile.close(); SDgfile.close();
-  #endif
-  #if defined(lisplibrary)
-  loadfromlibrary(NULL);
-  #endif
   repl(NULL);
 }
